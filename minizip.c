@@ -299,8 +299,10 @@ int32_t minizip_add(const char *path, const char *password, minizip_opt *options
 
             /* Add file system path to archive */
             err = mz_zip_writer_add_path(writer, filename_in_zip, NULL, options->include_path, 1);
-            if (err != MZ_OK)
+            if (err != MZ_OK) {
                 printf("Error %" PRId32 " adding path to archive %s\n", err, filename_in_zip);
+                break;
+            }
         }
     } else {
         printf("Error %" PRId32 " opening archive for writing\n", err);
