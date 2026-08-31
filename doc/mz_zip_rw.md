@@ -59,6 +59,7 @@ The _mz_zip_reader_ and _mz_zip_writer_ objects allows you to easily extract or 
   - [mz\_zip\_writer\_is\_open](#mz_zip_writer_is_open)
   - [mz\_zip\_writer\_open](#mz_zip_writer_open)
   - [mz\_zip\_writer\_open\_file](#mz_zip_writer_open_file)
+  - [mz\_zip\_writer\_open\_file\_exclusive](#mz_zip_writer_open_file_exclusive)
   - [mz\_zip\_writer\_open\_file\_in\_memory](#mz_zip_writer_open_file_in_memory)
   - [mz\_zip\_writer\_close](#mz_zip_writer_close)
 - [Writer Entry](#writer-entry)
@@ -72,6 +73,8 @@ The _mz_zip_reader_ and _mz_zip_writer_ objects allows you to easily extract or 
   - [mz\_zip\_writer\_add\_buffer](#mz_zip_writer_add_buffer)
   - [mz\_zip\_writer\_add\_file](#mz_zip_writer_add_file)
   - [mz\_zip\_writer\_add\_path](#mz_zip_writer_add_path)
+  - [mz\_zip\_writer\_prepare\_path](#mz_zip_writer_prepare_path)
+  - [mz\_zip\_writer\_add\_prepared\_paths](#mz_zip_writer_add_prepared_paths)
   - [mz\_zip\_writer\_copy\_from\_reader](#mz_zip_writer_copy_from_reader)
 - [Writer Object](#writer-object)
   - [mz\_zip\_writer\_set\_password](#mz_zip_writer_set_password)
@@ -85,6 +88,7 @@ The _mz_zip_reader_ and _mz_zip_writer_ objects allows you to easily extract or 
   - [mz\_zip\_writer\_get\_follow\_links](#mz_zip_writer_get_follow_links)
   - [mz\_zip\_writer\_set\_store\_links](#mz_zip_writer_set_store_links)
   - [mz\_zip\_writer\_set\_zip\_cd](#mz_zip_writer_set_zip_cd)
+  - [mz\_zip\_writer\_set\_exclude\_path](#mz_zip_writer_set_exclude_path)
   - [mz\_zip\_writer\_set\_overwrite\_cb](#mz_zip_writer_set_overwrite_cb)
   - [mz\_zip\_writer\_set\_password\_cb](#mz_zip_writer_set_password_cb)
   - [mz\_zip\_writer\_set\_progress\_cb](#mz_zip_writer_set_progress_cb)
@@ -1291,7 +1295,7 @@ Opens zip file from a file path.
 **Arguments**
 |Type|Name|Description|
 |-|-|-|
-|void *|handle|_mz_zip_reader_ instance|
+|void *|handle|_mz_zip_writer_ instance|
 |const char *|path|Path to zip file|
 |int64_t|disk_size|Disk size in bytes if using disk spanning, otherwise 0|
 |uint8_t|append|Opens in append mode if 1|
@@ -1307,6 +1311,33 @@ const char *path = "c:\\my.zip";
 void *zip_writer = mz_zip_writer_create();
 if (mz_zip_writer_open_file(zip_writer, path, 0, 0) == MZ_OK) {
     printf("Zip writer was opened %s\n", path);
+    mz_zip_writer_close(zip_writer);
+}
+mz_zip_writer_delete(&zip_writer);
+```
+
+### mz_zip_writer_open_file_exclusive
+
+Creates and opens a zip file without replacing an existing path. Unlike _mz_zip_writer_open_file_, this function does
+not support disk spanning or append mode.
+
+**Arguments**
+|Type|Name|Description|
+|-|-|-|
+|void *|handle|_mz_zip_writer_ instance|
+|const char *|path|Path to zip file|
+
+**Return**
+|Type|Description|
+|-|-|
+|int32_t|[MZ_ERROR](mz_error.md) code, MZ_OK if opened, MZ_EXIST_ERROR if the path already exists, or MZ_OPEN_ERROR for other open failures|
+
+**Example**
+```
+const char *path = "c:\\my.zip";
+void *zip_writer = mz_zip_writer_create();
+if (mz_zip_writer_open_file_exclusive(zip_writer, path) == MZ_OK) {
+    printf("Zip writer created %s\n", path);
     mz_zip_writer_close(zip_writer);
 }
 mz_zip_writer_delete(&zip_writer);
@@ -1611,7 +1642,7 @@ if (mz_zip_writer_add_file(zip_writer, path, filename_in_zip) == MZ_OK) {
 
 ### mz_zip_writer_add_path
 
-Enumerates a directory or pattern and adds entries to the zip.
+Enumerates a directory or pattern and adds each resulting entry to the zip as it is discovered.
 
 **Arguments**
 |Type|Name|Description|
@@ -1632,6 +1663,58 @@ Enumerates a directory or pattern and adds entries to the zip.
 if (mz_zip_writer_add_path(zip_writer, "c:\\dir1\\dir2\\", "c:\\dir1\", 0, 1) == MZ_OK) {
     printf("Added entries from c:\\dir1\\dir2\\ recursively\n");
 }
+```
+
+### mz_zip_writer_prepare_path
+
+Enumerates a directory or pattern using the same traversal rules as _mz_zip_writer_add_path_, but retains the resulting
+paths without adding them to the zip. This can be called before opening the writer so input discovery completes before
+an output file is created. Follow-link, store-link, and excluded-path settings are applied during enumeration. File
+contents and metadata are read later when the retained paths are added.
+
+Retained paths are appended across calls. They are released by _mz_zip_writer_add_prepared_paths_ or when the writer
+is deleted.
+
+**Arguments**
+|Type|Name|Description|
+|-|-|-|
+|void *|handle|_mz_zip_writer_ instance|
+|const char *|path|Path of directory to prepare (can include search pattern)|
+|const char *|root_path|Root directory used to name entries relative to this path|
+|uint8_t|include_path|Include the full path if 1|
+|uint8_t|recursive|Process directory recursively if 1|
+
+**Return**
+|Type|Description|
+|-|-|
+|int32_t|[MZ_ERROR](mz_error.md) code, MZ_OK if successfully retained.|
+
+**Example**
+```
+if (mz_zip_writer_prepare_path(zip_writer, "c:\\dir1\\*", NULL, 0, 1) == MZ_OK) {
+    printf("Prepared entries before opening the output zip\n");
+}
+```
+
+### mz_zip_writer_add_prepared_paths
+
+Adds every path retained by one or more calls to _mz_zip_writer_prepare_path_ to the open zip, then releases the
+retained list. The retained list is also released if adding an entry fails.
+
+**Arguments**
+|Type|Name|Description|
+|-|-|-|
+|void *|handle|_mz_zip_writer_ instance|
+
+**Return**
+|Type|Description|
+|-|-|
+|int32_t|[MZ_ERROR](mz_error.md) code, MZ_OK if all retained entries were added.|
+
+**Example**
+```
+if (mz_zip_writer_open_file_exclusive(zip_writer, "c:\\output.zip") == MZ_OK)
+    mz_zip_writer_add_prepared_paths(zip_writer);
 ```
 
 ### mz_zip_writer_copy_from_reader
@@ -1877,6 +1960,27 @@ Sets whether or not the central directory should be zipped.
 **Example**
 ```
 mz_zip_writer_set_zip_cd(zip_writer, 1);
+```
+
+### mz_zip_writer_set_exclude_path
+
+Sets a source file to omit from path-based add operations such as _mz_zip_writer_add_path_ and
+_mz_zip_writer_prepare_path_. Passing NULL clears the excluded path.
+
+**Arguments**
+|Type|Name|Description|
+|-|-|-|
+|void *|handle|_mz_zip_writer_ instance|
+|const char *|path|Path to exclude|
+
+**Return**
+|Type|Description|
+|-|-|
+|int32_t|[MZ_ERROR](mz_error.md) code, MZ_OK if successful|
+
+**Example**
+```
+mz_zip_writer_set_exclude_path(zip_writer, "c:\\output.zip");
 ```
 
 ### mz_zip_writer_set_overwrite_cb
