@@ -1107,6 +1107,12 @@ void mz_zip_reader_delete(void **handle) {
 
 /***************************************************************************/
 
+typedef struct mz_zip_writer_path_s {
+    char *path;
+    char *filename;
+    struct mz_zip_writer_path_s *next;
+} mz_zip_writer_path;
+
 typedef struct mz_zip_writer_s {
     void *zip_handle;
     void *file_stream;
@@ -1126,10 +1132,15 @@ typedef struct mz_zip_writer_s {
     uint32_t progress_cb_interval_ms;
     void *entry_userdata;
     mz_zip_writer_entry_cb entry_cb;
+    char *file_path;
+    char *exclude_path;
+    mz_zip_writer_path *path_head;
+    mz_zip_writer_path *path_tail;
     const char *password;
     const char *comment;
     uint16_t compress_method;
     int16_t compress_level;
+    int64_t disk_size;
     uint8_t follow_links;
     uint8_t store_links;
     uint8_t zip_cd;
@@ -1239,29 +1250,41 @@ int32_t mz_zip_writer_open(void *handle, void *stream, uint8_t append) {
     return mz_zip_writer_open_int(writer, stream, mode);
 }
 
-int32_t mz_zip_writer_open_file(void *handle, const char *path, int64_t disk_size, uint8_t append) {
+static int32_t mz_zip_writer_open_file_int(void *handle, const char *path, int64_t disk_size, uint8_t append,
+                                           uint8_t exclusive) {
     mz_zip_writer *writer = (mz_zip_writer *)handle;
     int32_t mode = MZ_OPEN_MODE_READWRITE;
     int32_t err = MZ_OK;
     int32_t err_cb = 0;
-    char directory[320];
+    uint8_t path_exists = 0;
+    char *directory = NULL;
 
-    if (!writer)
+    if (!writer || !path)
         return MZ_PARAM_ERROR;
     mz_zip_writer_close(writer);
 
-    if (mz_os_file_exists(path) != MZ_OK) {
+    writer->file_path = (char *)strdup(path);
+    if (!writer->file_path)
+        return MZ_MEM_ERROR;
+    writer->disk_size = disk_size;
+    path_exists = (mz_os_file_exists(path) == MZ_OK);
+
+    /* Create destination directory if it doesn't already exist */
+    if (!path_exists && (strchr(path, '/') || strrchr(path, '\\'))) {
+        directory = (char *)strdup(path);
+        if (!directory)
+            return MZ_MEM_ERROR;
+        mz_path_remove_filename(directory);
+        if (mz_os_file_exists(directory) != MZ_OK)
+            mz_dir_make(directory);
+        free(directory);
+    }
+
+    if (exclusive) {
+        mode |= MZ_OPEN_MODE_CREATE | MZ_OPEN_MODE_EXCLUSIVE;
+    } else if (!path_exists) {
         /* If the file doesn't exist, we don't append file */
         mode |= MZ_OPEN_MODE_CREATE;
-
-        /* Create destination directory if it doesn't already exist */
-        if (strchr(path, '/') || strrchr(path, '\\')) {
-            strncpy(directory, path, sizeof(directory) - 1);
-            directory[sizeof(directory) - 1] = 0;
-            mz_path_remove_filename(directory);
-            if (mz_os_file_exists(directory) != MZ_OK)
-                mz_dir_make(directory);
-        }
     } else if (append) {
         mode |= MZ_OPEN_MODE_APPEND;
     } else {
@@ -1298,10 +1321,21 @@ int32_t mz_zip_writer_open_file(void *handle, const char *path, int64_t disk_siz
     mz_stream_split_set_prop_int64(writer->split_stream, MZ_STREAM_PROP_DISK_SIZE, disk_size);
 
     err = mz_stream_open(writer->split_stream, path, mode);
-    if (err == MZ_OK)
+    if (err == MZ_OK) {
         err = mz_zip_writer_open_int(writer, writer->split_stream, mode);
+        if (err != MZ_OK && exclusive)
+            mz_os_unlink(path);
+    }
 
     return err;
+}
+
+int32_t mz_zip_writer_open_file(void *handle, const char *path, int64_t disk_size, uint8_t append) {
+    return mz_zip_writer_open_file_int(handle, path, disk_size, append, 0);
+}
+
+int32_t mz_zip_writer_open_file_exclusive(void *handle, const char *path) {
+    return mz_zip_writer_open_file_int(handle, path, 0, 0, 1);
 }
 
 int32_t mz_zip_writer_open_file_in_memory(void *handle, const char *path) {
@@ -1389,6 +1423,11 @@ int32_t mz_zip_writer_close(void *handle) {
         mz_stream_mem_delete(&writer->mem_stream);
     }
 
+    if (writer->file_path) {
+        free(writer->file_path);
+        writer->file_path = NULL;
+    }
+    writer->disk_size = 0;
     return err;
 }
 
@@ -1656,6 +1695,120 @@ int32_t mz_zip_writer_add_buffer(void *handle, const void *buf, int32_t len, mz_
     return err;
 }
 
+static int32_t mz_zip_writer_path_matches(void *handle, const char *path, const char *archive_path) {
+    mz_zip_writer *writer = (mz_zip_writer *)handle;
+    const char *path_ext = NULL;
+    const char *path_ext_ptr = NULL;
+    const char *archive_ext = NULL;
+    char *split_path = NULL;
+    size_t split_path_size = 0;
+    size_t archive_prefix_size = 0;
+    int32_t err = MZ_EXIST_ERROR;
+
+    if (!writer || !path || !archive_path)
+        return MZ_PARAM_ERROR;
+    err = mz_os_path_same_file(path, archive_path);
+    if (err == MZ_OK || err == MZ_MEM_ERROR)
+        return err;
+    if (writer->disk_size == 0)
+        return MZ_EXIST_ERROR;
+
+    path_ext = strrchr(path, '.');
+    archive_ext = strrchr(archive_path, '.');
+    if (!path_ext || !archive_ext || (path_ext[1] != 'z' && path_ext[1] != 'Z') || path_ext[2] == 0)
+        return MZ_EXIST_ERROR;
+
+    for (path_ext_ptr = path_ext + 2; *path_ext_ptr != 0; path_ext_ptr += 1) {
+        if (*path_ext_ptr < '0' || *path_ext_ptr > '9')
+            return MZ_EXIST_ERROR;
+    }
+
+    archive_prefix_size = (size_t)(archive_ext - archive_path);
+    split_path_size = archive_prefix_size + strlen(path_ext) + 1;
+    split_path = (char *)malloc(split_path_size);
+    if (!split_path)
+        return MZ_MEM_ERROR;
+
+    memcpy(split_path, archive_path, archive_prefix_size);
+    strcpy(split_path + archive_prefix_size, path_ext);
+    if (mz_os_path_same_file(path, split_path) == MZ_OK)
+        err = MZ_OK;
+
+    free(split_path);
+    return err;
+}
+
+static void mz_zip_writer_path_list_delete(mz_zip_writer_path **head, mz_zip_writer_path **tail) {
+    mz_zip_writer_path *item = NULL;
+    mz_zip_writer_path *next = NULL;
+
+    if (!head || !tail)
+        return;
+
+    item = *head;
+    while (item) {
+        next = item->next;
+        free(item->path);
+        free(item->filename);
+        free(item);
+        item = next;
+    }
+
+    *head = NULL;
+    *tail = NULL;
+}
+
+static int32_t mz_zip_writer_path_list_append(mz_zip_writer_path **head, mz_zip_writer_path **tail, const char *path,
+                                              const char *filename) {
+    mz_zip_writer_path *item = NULL;
+
+    if (!head || !tail || !path || !filename)
+        return MZ_PARAM_ERROR;
+
+    item = (mz_zip_writer_path *)calloc(1, sizeof(mz_zip_writer_path));
+    if (!item)
+        return MZ_MEM_ERROR;
+
+    item->path = (char *)strdup(path);
+    item->filename = (char *)strdup(filename);
+    if (!item->path || !item->filename) {
+        free(item->path);
+        free(item->filename);
+        free(item);
+        return MZ_MEM_ERROR;
+    }
+
+    if (*tail)
+        (*tail)->next = item;
+    else
+        *head = item;
+    *tail = item;
+    return MZ_OK;
+}
+
+static int32_t mz_zip_writer_path_is_excluded(void *handle, const char *path) {
+    mz_zip_writer *writer = (mz_zip_writer *)handle;
+    int32_t err = MZ_EXIST_ERROR;
+
+    if (!writer || !path)
+        return MZ_PARAM_ERROR;
+    if (writer->store_links && mz_os_is_symlink(path) == MZ_OK)
+        return MZ_EXIST_ERROR;
+
+    if (writer->file_path) {
+        err = mz_zip_writer_path_matches(writer, path, writer->file_path);
+        if (err == MZ_OK || err == MZ_MEM_ERROR)
+            return err;
+    }
+    if (writer->exclude_path) {
+        err = mz_zip_writer_path_matches(writer, path, writer->exclude_path);
+        if (err == MZ_OK || err == MZ_MEM_ERROR)
+            return err;
+    }
+
+    return MZ_EXIST_ERROR;
+}
+
 int32_t mz_zip_writer_add_file(void *handle, const char *path, const char *filename_in_zip) {
     mz_zip_writer *writer = (mz_zip_writer *)handle;
     mz_zip_file file_info;
@@ -1672,6 +1825,11 @@ int32_t mz_zip_writer_add_file(void *handle, const char *path, const char *filen
         return MZ_PARAM_ERROR;
     if (!path)
         return MZ_PARAM_ERROR;
+
+    err = mz_zip_writer_path_is_excluded(writer, path);
+    if (err == MZ_OK || err == MZ_MEM_ERROR)
+        return err;
+    err = MZ_OK;
 
     if (!filename) {
         err = mz_path_get_filename(path, &filename);
@@ -1749,8 +1907,35 @@ int32_t mz_zip_writer_add_file(void *handle, const char *path, const char *filen
     return err;
 }
 
-int32_t mz_zip_writer_add_path(void *handle, const char *path, const char *root_path, uint8_t include_path,
-                               uint8_t recursive) {
+static int32_t mz_zip_writer_path_combine_alloc(const char *path, const char *name, char **combined_path) {
+    size_t path_length = 0;
+    size_t name_length = 0;
+    size_t combined_length = 0;
+    uint8_t append_slash = 0;
+
+    if (!path || !name || !combined_path)
+        return MZ_PARAM_ERROR;
+
+    path_length = strlen(path);
+    name_length = strlen(name);
+    append_slash = (path_length > 0 && !mz_os_is_dir_separator(path[path_length - 1]));
+    if (path_length > (size_t)-1 - name_length - append_slash - 1)
+        return MZ_MEM_ERROR;
+
+    combined_length = path_length + append_slash + name_length + 1;
+    *combined_path = (char *)malloc(combined_length);
+    if (!*combined_path)
+        return MZ_MEM_ERROR;
+
+    memcpy(*combined_path, path, path_length);
+    if (append_slash)
+        (*combined_path)[path_length++] = MZ_PATH_SLASH_PLATFORM;
+    memcpy(*combined_path + path_length, name, name_length + 1);
+    return MZ_OK;
+}
+
+static int32_t mz_zip_writer_process_path(void *handle, const char *path, const char *root_path, uint8_t include_path,
+                                          uint8_t recursive, mz_zip_writer_path **head, mz_zip_writer_path **tail) {
     mz_zip_writer *writer = (mz_zip_writer *)handle;
     DIR *dir = NULL;
     struct dirent *entry = NULL;
@@ -1758,17 +1943,31 @@ int32_t mz_zip_writer_add_path(void *handle, const char *path, const char *root_
     int16_t is_dir = 0;
     const char *filename = NULL;
     const char *filenameinzip = path;
-    char *wildcard_ptr = NULL;
-    char full_path[1024];
-    char path_dir[1024];
+    const char *wildcard_filename = NULL;
+    char *full_path = NULL;
+    char *path_dir = NULL;
+    char *wildcard = NULL;
 
-    if (!writer)
+    if (!writer || !path || ((head == NULL) != (tail == NULL)))
         return MZ_PARAM_ERROR;
     if (strrchr(path, '*') && mz_os_file_exists(path) != MZ_OK) {
-        strncpy(path_dir, path, sizeof(path_dir) - 1);
-        path_dir[sizeof(path_dir) - 1] = 0;
+        if (mz_path_get_filename(path, &wildcard_filename) != MZ_OK)
+            wildcard_filename = path;
+        wildcard = (char *)strdup(wildcard_filename);
+        path_dir = (char *)strdup(path);
+        if (!wildcard || !path_dir) {
+            err = MZ_MEM_ERROR;
+            goto cleanup;
+        }
         mz_path_remove_filename(path_dir);
-        wildcard_ptr = path_dir + strlen(path_dir) + 1;
+        if (path_dir[0] == 0) {
+            free(path_dir);
+            path_dir = (char *)strdup(".");
+            if (!path_dir) {
+                err = MZ_MEM_ERROR;
+                goto cleanup;
+            }
+        }
         root_path = path = path_dir;
     } else {
         if (mz_os_is_dir(path) == MZ_OK)
@@ -1793,44 +1992,128 @@ int32_t mz_zip_writer_add_path(void *handle, const char *path, const char *root_
                 return err;
         }
 
-        if (*filenameinzip != 0)
-            err = mz_zip_writer_add_file(writer, path, filenameinzip);
+        if (*filenameinzip != 0) {
+            if (head) {
+                err = mz_zip_writer_path_is_excluded(writer, path);
+                if (err == MZ_EXIST_ERROR)
+                    err = mz_zip_writer_path_list_append(head, tail, path, filenameinzip);
+                else if (err == MZ_OK)
+                    err = MZ_OK;
+            } else {
+                err = mz_zip_writer_add_file(writer, path, filenameinzip);
+            }
+        }
 
         if (!is_dir)
-            return err;
+            goto cleanup;
 
         if (writer->store_links) {
             if (mz_os_is_symlink(path) == MZ_OK)
-                return err;
+                goto cleanup;
         }
     }
 
     dir = mz_os_open_dir(path);
 
-    if (!dir)
-        return MZ_EXIST_ERROR;
+    if (!dir) {
+        err = MZ_EXIST_ERROR;
+        goto cleanup;
+    }
 
     while ((entry = mz_os_read_dir(dir))) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
 
-        full_path[0] = 0;
-        mz_path_combine(full_path, path, sizeof(full_path));
-        mz_path_combine(full_path, entry->d_name, sizeof(full_path));
+        err = mz_zip_writer_path_combine_alloc(path, entry->d_name, &full_path);
+        if (err != MZ_OK)
+            break;
 
-        if (!recursive && mz_os_is_dir(full_path) == MZ_OK)
+        if (!recursive && mz_os_is_dir(full_path) == MZ_OK) {
+            free(full_path);
+            full_path = NULL;
             continue;
+        }
 
-        if ((wildcard_ptr) && (mz_path_compare_wc(entry->d_name, wildcard_ptr, 1) != MZ_OK))
+        if (wildcard && mz_path_compare_wc(entry->d_name, wildcard, 1) != MZ_OK) {
+            free(full_path);
+            full_path = NULL;
             continue;
+        }
 
-        err = mz_zip_writer_add_path(writer, full_path, root_path, include_path, recursive);
+        err = mz_zip_writer_process_path(writer, full_path, root_path, include_path, recursive, head, tail);
+        free(full_path);
+        full_path = NULL;
         if (err != MZ_OK)
             break;
     }
 
-    mz_os_close_dir(dir);
+cleanup:
+    if (dir)
+        mz_os_close_dir(dir);
+    free(full_path);
+    free(path_dir);
+    free(wildcard);
     return err;
+}
+
+static int32_t mz_zip_writer_add_path_list(void *handle, mz_zip_writer_path **head, mz_zip_writer_path **tail) {
+    mz_zip_writer *writer = (mz_zip_writer *)handle;
+    mz_zip_writer_path *item = NULL;
+    int32_t err = MZ_OK;
+
+    if (!writer || !head || !tail)
+        return MZ_PARAM_ERROR;
+
+    item = *head;
+    while (item && err == MZ_OK) {
+        err = mz_zip_writer_add_file(writer, item->path, item->filename);
+        item = item->next;
+    }
+
+    mz_zip_writer_path_list_delete(head, tail);
+    return err;
+}
+
+int32_t mz_zip_writer_prepare_path(void *handle, const char *path, const char *root_path, uint8_t include_path,
+                                   uint8_t recursive) {
+    mz_zip_writer *writer = (mz_zip_writer *)handle;
+    mz_zip_writer_path *head = NULL;
+    mz_zip_writer_path *tail = NULL;
+    int32_t err = MZ_OK;
+
+    if (!writer)
+        return MZ_PARAM_ERROR;
+
+    err = mz_zip_writer_process_path(writer, path, root_path, include_path, recursive, &head, &tail);
+    if (err != MZ_OK) {
+        mz_zip_writer_path_list_delete(&head, &tail);
+        return err;
+    }
+
+    if (writer->path_tail)
+        writer->path_tail->next = head;
+    else
+        writer->path_head = head;
+    if (tail)
+        writer->path_tail = tail;
+    return MZ_OK;
+}
+
+int32_t mz_zip_writer_add_prepared_paths(void *handle) {
+    mz_zip_writer *writer = (mz_zip_writer *)handle;
+
+    if (!writer)
+        return MZ_PARAM_ERROR;
+    return mz_zip_writer_add_path_list(writer, &writer->path_head, &writer->path_tail);
+}
+
+int32_t mz_zip_writer_add_path(void *handle, const char *path, const char *root_path, uint8_t include_path,
+                               uint8_t recursive) {
+    mz_zip_writer *writer = (mz_zip_writer *)handle;
+
+    if (!writer)
+        return MZ_PARAM_ERROR;
+    return mz_zip_writer_process_path(writer, path, root_path, include_path, recursive, NULL, NULL);
 }
 
 int32_t mz_zip_writer_copy_from_reader(void *handle, void *reader) {
@@ -1975,6 +2258,23 @@ void mz_zip_writer_set_zip_cd(void *handle, uint8_t zip_cd) {
     writer->zip_cd = zip_cd;
 }
 
+int32_t mz_zip_writer_set_exclude_path(void *handle, const char *path) {
+    mz_zip_writer *writer = (mz_zip_writer *)handle;
+    char *exclude_path = NULL;
+
+    if (!writer)
+        return MZ_PARAM_ERROR;
+    if (path) {
+        exclude_path = (char *)strdup(path);
+        if (!exclude_path)
+            return MZ_MEM_ERROR;
+    }
+
+    free(writer->exclude_path);
+    writer->exclude_path = exclude_path;
+    return MZ_OK;
+}
+
 void mz_zip_writer_set_overwrite_cb(void *handle, void *userdata, mz_zip_writer_overwrite_cb cb) {
     mz_zip_writer *writer = (mz_zip_writer *)handle;
     if (!writer)
@@ -2056,6 +2356,8 @@ void mz_zip_writer_delete(void **handle) {
     writer = (mz_zip_writer *)*handle;
     if (writer) {
         mz_zip_writer_close(writer);
+        mz_zip_writer_path_list_delete(&writer->path_head, &writer->path_tail);
+        free(writer->exclude_path);
         free(writer);
     }
     *handle = NULL;

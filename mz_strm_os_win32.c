@@ -69,6 +69,7 @@ typedef struct mz_stream_win32_s {
 
 int32_t mz_stream_os_open(void *stream, const char *path, int32_t mode) {
     mz_stream_win32 *win32 = (mz_stream_win32 *)stream;
+    DWORD open_error = ERROR_SUCCESS;
     uint32_t desired_access = 0;
     uint32_t creation_disposition = 0;
     uint32_t share_mode = FILE_SHARE_READ;
@@ -89,7 +90,10 @@ int32_t mz_stream_os_open(void *stream, const char *path, int32_t mode) {
         creation_disposition = OPEN_EXISTING;
     } else if (mode & MZ_OPEN_MODE_CREATE) {
         desired_access = GENERIC_WRITE | GENERIC_READ;
-        creation_disposition = CREATE_ALWAYS;
+        if (mode & MZ_OPEN_MODE_EXCLUSIVE)
+            creation_disposition = CREATE_NEW;
+        else
+            creation_disposition = CREATE_ALWAYS;
     } else {
         return MZ_PARAM_ERROR;
     }
@@ -105,11 +109,15 @@ int32_t mz_stream_os_open(void *stream, const char *path, int32_t mode) {
 #else
     win32->handle = CreateFileW(path_wide, desired_access, share_mode, NULL, creation_disposition, flags_attribs, NULL);
 #endif
+    if (win32->handle == INVALID_HANDLE_VALUE)
+        open_error = GetLastError();
 
     mz_os_unicode_string_delete(&path_wide);
 
     if (mz_stream_os_is_open(stream) != MZ_OK) {
-        win32->error = GetLastError();
+        win32->error = open_error;
+        if ((mode & MZ_OPEN_MODE_EXCLUSIVE) && (open_error == ERROR_FILE_EXISTS || open_error == ERROR_ALREADY_EXISTS))
+            return MZ_EXIST_ERROR;
         return MZ_OPEN_ERROR;
     }
 

@@ -890,6 +890,73 @@ if(MZ_BUILD_TESTS AND MZ_BUILD_UNIT_TESTS)
 
     set(TEST_TEMP_DIR ${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary)
 
+    if(NOT MZ_DECOMPRESS_ONLY)
+        add_test(NAME self-include
+                 COMMAND ${CMAKE_COMMAND}
+                    -DMINIZIP=$<TARGET_FILE:minizip_cli>
+                    -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/random.bin
+                    -DTEST_DIR=${TEST_TEMP_DIR}/self-include
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/test/test_self_include.cmake)
+
+        add_test(NAME temp-collision
+                 COMMAND ${CMAKE_COMMAND}
+                    -DMINIZIP=$<TARGET_FILE:minizip_cli>
+                    -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/random.bin
+                    -DTEST_DIR=${TEST_TEMP_DIR}/temp-collision
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/test/test_temp_collision.cmake)
+
+        add_test(NAME replace-failure-cleanup
+                 COMMAND ${CMAKE_COMMAND}
+                    -DMINIZIP=$<TARGET_FILE:minizip_cli>
+                    -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/random.bin
+                    -DTEST_DIR=${TEST_TEMP_DIR}/replace-failure-cleanup
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/test/test_replace_failure.cmake)
+
+        add_test(NAME append-preserves-prefix
+                 COMMAND ${CMAKE_COMMAND}
+                    -DMINIZIP=$<TARGET_FILE:minizip_cli>
+                    -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/random.bin
+                    -DSECOND_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/uniform.bin
+                    -DTEST_DIR=${TEST_TEMP_DIR}/append-preserves-prefix
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/test/test_append_prefix.cmake)
+
+        add_test(NAME append-invalid-cleanup
+                 COMMAND ${CMAKE_COMMAND}
+                    -DMINIZIP=$<TARGET_FILE:minizip_cli>
+                    -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/random.bin
+                    -DSECOND_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/uniform.bin
+                    -DTEST_DIR=${TEST_TEMP_DIR}/append-invalid-cleanup
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/test/test_append_invalid.cmake)
+
+        if((MZ_ZLIB OR MZ_LIBCOMP) AND NOT MZ_COMPRESS_ONLY)
+            add_test(NAME append-mixed-method
+                     COMMAND ${CMAKE_COMMAND}
+                        -DMINIZIP=$<TARGET_FILE:minizip_cli>
+                        -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/random.bin
+                        -DSECOND_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/uniform.bin
+                        -DTEST_DIR=${TEST_TEMP_DIR}/append-mixed-method
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/test/test_append_mixed_method.cmake)
+        endif()
+
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_test(NAME long-output-path
+                     COMMAND ${CMAKE_COMMAND}
+                        -DMINIZIP=$<TARGET_FILE:minizip_cli>
+                        -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/random.bin
+                        -DTEST_DIR=${TEST_TEMP_DIR}/long-output-path
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/test/test_long_output_path.cmake)
+        endif()
+    endif()
+
+    if(MZ_PKCRYPT AND NOT MZ_DECOMPRESS_ONLY)
+        add_test(NAME append-encrypted-zipcd
+                 COMMAND ${CMAKE_COMMAND}
+                    -DMINIZIP=$<TARGET_FILE:minizip_cli>
+                    -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/random.bin
+                    -DTEST_DIR=${TEST_TEMP_DIR}/append-encrypted-zipcd
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/test/test_append_encrypted_zipcd.cmake)
+    endif()
+
     function(create_compress_tests EXTRA_NAME EXTRA_ARGS)
         if(MZ_DECOMPRESS_ONLY)
             return()

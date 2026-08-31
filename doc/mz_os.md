@@ -29,6 +29,9 @@ These functions provide support for handling common file system operations.
   - [mz\_os\_get\_default\_encoding](#mz_os_get_default_encoding)
   - [mz\_os\_rand](#mz_os_rand)
   - [mz\_os\_rename](#mz_os_rename)
+  - [mz\_os\_get\_replace\_path](#mz_os_get_replace_path)
+  - [mz\_os\_replace](#mz_os_replace)
+  - [mz\_os\_replace\_resolved](#mz_os_replace_resolved)
   - [mz\_os\_unlink](#mz_os_unlink)
   - [mz\_os\_file\_exists](#mz_os_file_exists)
   - [mz\_os\_get\_file\_size](#mz_os_get_file_size)
@@ -37,6 +40,7 @@ These functions provide support for handling common file system operations.
   - [mz\_os\_get\_file\_attribs](#mz_os_get_file_attribs)
   - [mz\_os\_set\_file\_attribs](#mz_os_set_file_attribs)
   - [mz\_os\_get\_temp\_path](#mz_os_get_temp_path)
+  - [mz\_os\_path\_same\_file](#mz_os_path_same_file)
   - [mz\_os\_make\_dir](#mz_os_make_dir)
   - [mz\_os\_open\_dir](#mz_os_open_dir)
   - [mz\_os\_read\_dir](#mz_os_read_dir)
@@ -598,6 +602,86 @@ if (mz_os_rename("c:\\test1.txt", "c:\\test2.txt") == MZ_OK)
     printf("File was renamed successfully\n");
 ```
 
+### mz_os_get_replace_path
+
+Gets the actual filesystem path that will be replaced. On POSIX systems, symbolic links are resolved while the final
+target is allowed to not exist. The returned path must be released with `free`.
+
+**Arguments**
+|Type|Name|Description|
+|-|-|-|
+|const char *|target_path|Path requested by the caller|
+|char **|replace_path|Receives the allocated replacement path|
+
+**Return**
+|Type|Description|
+|-|-|
+|int32_t|[MZ_ERROR](mz_error.md) code, MZ_OK if successful|
+
+**Example**
+```
+char *replace_path = NULL;
+if (mz_os_get_replace_path("c:\\archive.zip", &replace_path) == MZ_OK)
+    free(replace_path);
+```
+
+### mz_os_replace
+
+Replaces a file while preserving target permissions, ownership, ACLs, and extended attributes where supported.
+Symbolic links in `target_path` are resolved before replacement.
+
+If the target has multiple hard links, its existing inode is updated so every link observes the new contents. In this
+case, _MZ_INTERNAL_ERROR_ indicates that an in-place update may be partial and the source file must be retained for
+recovery. On Windows, the same error also reports a partial failure from `ReplaceFileW`.
+
+**Arguments**
+|Type|Name|Description|
+|-|-|-|
+|const char *|source_path|Path to the replacement file|
+|const char *|target_path|Path to the file being replaced|
+
+**Return**
+|Type|Description|
+|-|-|
+|int32_t|[MZ_ERROR](mz_error.md) code, MZ_OK if successful|
+
+**Example**
+```
+if (mz_os_replace("c:\\new.zip", "c:\\archive.zip") == MZ_OK)
+    printf("File was replaced successfully\n");
+```
+
+### mz_os_replace_resolved
+
+Replaces a file at a path returned by _mz_os_get_replace_path_ without resolving the final path again. This prevents a
+symbolic link changed after path resolution from redirecting the replacement. Target permissions, ownership, ACLs, and
+extended attributes are preserved where supported.
+
+If the target has multiple hard links, its existing inode is updated so every link observes the new contents. In this
+case, _MZ_INTERNAL_ERROR_ indicates that an in-place update may be partial and the source file must be retained for
+recovery. On Windows, the same error also reports a partial failure from `ReplaceFileW`.
+
+**Arguments**
+|Type|Name|Description|
+|-|-|-|
+|const char *|source_path|Path to the replacement file|
+|const char *|replace_path|Resolved path to replace|
+
+**Return**
+|Type|Description|
+|-|-|
+|int32_t|[MZ_ERROR](mz_error.md) code, MZ_OK if successful|
+
+**Example**
+```
+char *replace_path = NULL;
+if (mz_os_get_replace_path("c:\\archive.zip", &replace_path) == MZ_OK) {
+    if (mz_os_replace_resolved("c:\\new.zip", replace_path) == MZ_OK)
+        printf("File was replaced successfully\n");
+    free(replace_path);
+}
+```
+
 ### mz_os_unlink
 
 Delete an existing file.
@@ -793,6 +877,27 @@ Gets a unique temporary file path.
 char tmp_path[256];
 if (mz_os_get_temp_path(tmp_path, sizeof(tmp_path), "mz_") == MZ_OK)
     printf("Temporary path: %s\n", tmp_path);
+```
+
+### mz_os_path_same_file
+
+Checks whether two paths refer to the same file.
+
+**Arguments**
+|Type|Name|Description|
+|-|-|-|
+|const char *|path_a|First file path|
+|const char *|path_b|Second file path|
+
+**Return**
+|Type|Description|
+|-|-|
+|int32_t|[MZ_ERROR](mz_error.md) code, MZ_OK if both paths refer to the same file|
+
+**Example**
+```
+if (mz_os_path_same_file("c:\\archive.zip", "c:\\archive-link.zip") == MZ_OK)
+    printf("Paths refer to the same file\n");
 ```
 
 ### mz_os_make_dir

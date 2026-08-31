@@ -11,3 +11,4 @@ Stream open flag enumeration.
 |MZ_OPEN_MODE_CREATE|0x08|Open for creating|
 |MZ_OPEN_MODE_EXISTING|0x10|Open existing|
 |MZ_OPEN_MODE_NOFOLLOW|0x20|Do not follow symlinks|
+|MZ_OPEN_MODE_EXCLUSIVE|0x40|Create only if the path does not already exist|

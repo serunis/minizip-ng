@@ -169,6 +169,9 @@ int32_t mz_zip_writer_open(void *handle, void *stream, uint8_t append);
 int32_t mz_zip_writer_open_file(void *handle, const char *path, int64_t disk_size, uint8_t append);
 /* Opens zip file from a file path */
 
+int32_t mz_zip_writer_open_file_exclusive(void *handle, const char *path);
+/* Opens a newly created zip file without replacing an existing path */
+
 int32_t mz_zip_writer_open_file_in_memory(void *handle, const char *path);
 /* Opens zip file from a file path into memory for faster access */
 
@@ -207,6 +210,13 @@ int32_t mz_zip_writer_add_path(void *handle, const char *path, const char *root_
                                uint8_t recursive);
 /* Enumerates a directory or pattern and adds entries to the zip */
 
+int32_t mz_zip_writer_prepare_path(void *handle, const char *path, const char *root_path, uint8_t include_path,
+                                   uint8_t recursive);
+/* Enumerates a directory or pattern and retains entries for a later add operation */
+
+int32_t mz_zip_writer_add_prepared_paths(void *handle);
+/* Adds all retained path entries to the zip and releases the retained list */
+
 int32_t mz_zip_writer_copy_from_reader(void *handle, void *reader);
 /* Adds an entry from a zip reader instance */
 
@@ -244,6 +254,9 @@ void mz_zip_writer_set_store_links(void *handle, uint8_t store_links);
 
 void mz_zip_writer_set_zip_cd(void *handle, uint8_t zip_cd);
 /* Sets whether or not central directory should be zipped */
+
+int32_t mz_zip_writer_set_exclude_path(void *handle, const char *path);
+/* Excludes a source file from path-based add operations */
 
 int32_t mz_zip_writer_set_certificate(void *handle, const char *cert_path, const char *cert_pwd);
 /* Sets the certificate and timestamp url to use for signing when adding files in zip */

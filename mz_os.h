@@ -144,6 +144,17 @@ int32_t mz_os_rand(uint8_t *buf, int32_t size);
 int32_t mz_os_rename(const char *source_path, const char *target_path);
 /* Rename a file */
 
+int32_t mz_os_get_replace_path(const char *target_path, char **replace_path);
+/* Gets the actual filesystem path that will be replaced */
+
+int32_t mz_os_replace_resolved(const char *source_path, const char *replace_path);
+/* Replace a file at an already resolved path without following a final symbolic link.
+   MZ_INTERNAL_ERROR means an in-place replacement may be partial and the source must be retained for recovery. */
+
+int32_t mz_os_replace(const char *source_path, const char *target_path);
+/* Replace a file, preserving target permissions and extended metadata where supported.
+   MZ_INTERNAL_ERROR means an in-place replacement may be partial and the source must be retained for recovery. */
+
 int32_t mz_os_unlink(const char *path);
 /* Delete an existing file  */
 
@@ -170,6 +181,9 @@ int32_t mz_os_get_temp_path(char *path, int32_t max_path, const char *prefix);
 
 int32_t mz_os_path_same_fs(const char *path_a, const char *path_b);
 /* Checks if both paths are on the same filesystem */
+
+int32_t mz_os_path_same_file(const char *path_a, const char *path_b);
+/* Checks if both paths refer to the same file */
 
 int32_t mz_os_make_dir(const char *path);
 /* Recursively creates a directory */
