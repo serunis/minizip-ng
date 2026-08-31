@@ -95,8 +95,11 @@ cmake --build build
 
 ## Third-Party Libraries
 
-Third-party libraries may be required based on the CMake options selected. If the system already has the library
-installed then it will be used, otherwise CMake will retrieve the source code for the library from its official git repository and compile it in when the `MZ_FETCH_LIBS` option is enabled.
+Third-party libraries may be required based on the CMake options selected. CMake prefers an installed library,
+then source code in `third_party`, and finally retrieves the source code from its official git repository when
+`MZ_FETCH_LIBS` is enabled. `MZ_FORCE_FETCH_LIBS` skips installed libraries and fetches a dependency when no
+bundled source is available. When both fetch options are enabled, bundled sources are ignored and FetchContent
+manages the dependency in the build directory.
 
 |Project|License|CMake Option|Comments|
 |-|-|-|-|
