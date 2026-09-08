@@ -42,6 +42,22 @@ int32_t mz_path_combine(char *path, const char *join, int32_t max_path) {
     return MZ_OK;
 }
 
+int32_t mz_path_combine_safe(char *path, const char *join, int32_t max_path) {
+    if (!path || !join || !max_path)
+        return MZ_PARAM_ERROR;
+
+    /* Drop a drive letter and any leading separators so an absolute join stays under path */
+    if (*join != 0 && join[1] == ':')
+        join += 2;
+    while (mz_os_is_dir_separator(*join))
+        join += 1;
+
+    if (*join == 0)
+        return MZ_EXIST_ERROR;
+
+    return mz_path_combine(path, join, max_path);
+}
+
 int32_t mz_path_append_slash(char *path, int32_t max_path, char slash) {
     int32_t path_len = (int32_t)strlen(path);
     if ((path_len + 2) >= max_path)
@@ -280,7 +296,7 @@ int32_t mz_path_get_filename(const char *path, const char **filename) {
 int32_t mz_path_is_symlink_target_safe(const char *link_path, const char *target, const char *base_path) {
     char *combined = NULL;
     char *resolved = NULL;
-    size_t max_path = 1024;
+    size_t max_path = 0;
     size_t base_len = 0;
     size_t parent_len = 0;
     int32_t err = MZ_OK;
@@ -297,6 +313,8 @@ int32_t mz_path_is_symlink_target_safe(const char *link_path, const char *target
     /* Remove trailing slash from base_path for comparison */
     while (base_len > 0 && mz_os_is_dir_separator(base_path[base_len - 1]))
         base_len--;
+
+    max_path = strlen(link_path) + strlen(target) + 2;
 
     combined = (char *)calloc(1, max_path);
     resolved = (char *)calloc(1, max_path);
