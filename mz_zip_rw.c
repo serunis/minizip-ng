@@ -538,8 +538,8 @@ int32_t mz_zip_reader_entry_get_hash(void *handle, uint16_t algorithm, uint8_t *
             err = mz_stream_read_uint16(file_extra_stream, &cur_digest_size);
         if ((err == MZ_OK) && (cur_algorithm == algorithm) && (cur_digest_size <= digest_size) &&
             (cur_digest_size <= MZ_HASH_MAX_SIZE)) {
-            /* Read hash digest */
-            if (mz_stream_read(file_extra_stream, digest, digest_size) == cur_digest_size)
+            /* Read only this record's validated digest size, not the caller-supplied length */
+            if (mz_stream_read(file_extra_stream, digest, cur_digest_size) == cur_digest_size)
                 return_err = MZ_OK;
             break;
         } else {
@@ -698,6 +698,8 @@ int32_t mz_zip_reader_entry_save_file(void *handle, const char *path) {
     int32_t err_cb = MZ_OK;
     char *pathwfs = NULL;
     char *directory = NULL;
+    const char *destination_dir = NULL;
+    const char *check_path = NULL;
 
     if (mz_zip_reader_is_open(reader) != MZ_OK)
         return MZ_PARAM_ERROR;
@@ -718,20 +720,22 @@ int32_t mz_zip_reader_entry_save_file(void *handle, const char *path) {
     }
     mz_path_remove_filename(directory);
 
+    /* Check if path traverses through an existing symlink that escapes destination */
+    destination_dir = reader->destination_dir ? reader->destination_dir : ".";
+    check_path = *directory ? directory : destination_dir;
+    err = mz_dir_has_unsafe_symlink(check_path, destination_dir);
+    if (err != MZ_OK)
+        goto save_cleanup;
+
     /* If it is a directory entry then create a directory instead of writing file */
     if ((mz_zip_entry_is_dir(reader->zip_handle) == MZ_OK) && (mz_zip_entry_is_symlink(reader->zip_handle) != MZ_OK)) {
         err = mz_dir_make(directory);
         goto save_cleanup;
     }
 
-    /* Check if path traverses through an existing symlink that escapes destination */
-    if (reader->destination_dir && mz_dir_has_unsafe_symlink(directory, reader->destination_dir) != MZ_OK) {
-        err = MZ_EXIST_ERROR;
-        goto save_cleanup;
-    }
-
-    /* Check if file exists and ask if we want to overwrite */
-    if (reader->overwrite_cb && mz_os_file_exists(pathwfs) == MZ_OK) {
+    /* Check if a file or symlink exists and ask if we want to overwrite. A dangling symlink is
+       reported absent by stat, so check for the link itself as well. */
+    if (reader->overwrite_cb && (mz_os_file_exists(pathwfs) == MZ_OK || mz_os_is_symlink(pathwfs) == MZ_OK)) {
         err_cb = reader->overwrite_cb(reader, reader->overwrite_userdata, reader->file_info, pathwfs);
         if (err_cb != MZ_OK)
             goto save_cleanup;
@@ -756,9 +760,8 @@ int32_t mz_zip_reader_entry_save_file(void *handle, const char *path) {
     if (mz_zip_entry_is_symlink(reader->zip_handle) == MZ_OK) {
         if (reader->file_info->linkname && *reader->file_info->linkname != 0) {
             /* Create symbolic link from UNIX1 extrafield */
-            if (mz_path_is_symlink_target_safe(pathwfs, reader->file_info->linkname, reader->destination_dir) != MZ_OK)
-                err = MZ_EXIST_ERROR;
-            else
+            err = mz_path_is_symlink_target_safe(pathwfs, reader->file_info->linkname, reader->destination_dir);
+            if (err == MZ_OK)
                 err = mz_os_make_symlink(pathwfs, reader->file_info->linkname);
         } else if (reader->file_info->uncompressed_size < UINT16_MAX) {
             /* Create symbolic link from zip entry contents */
@@ -779,9 +782,8 @@ int32_t mz_zip_reader_entry_save_file(void *handle, const char *path) {
             if (err == MZ_OK) {
                 const char *linkname = NULL;
                 if (mz_stream_mem_get_buffer(stream, (const void **)&linkname) == MZ_OK) {
-                    if (mz_path_is_symlink_target_safe(pathwfs, linkname, reader->destination_dir) != MZ_OK)
-                        err = MZ_EXIST_ERROR;
-                    else
+                    err = mz_path_is_symlink_target_safe(pathwfs, linkname, reader->destination_dir);
+                    if (err == MZ_OK)
                         err = mz_os_make_symlink(pathwfs, linkname);
                 }
             }
@@ -793,6 +795,14 @@ int32_t mz_zip_reader_entry_save_file(void *handle, const char *path) {
         goto save_cleanup;
     }
 
+    /* Remove any symlink still at the output path so file creation writes a new file rather
+       than following the link to a location outside the destination */
+    if (mz_os_is_symlink(pathwfs) == MZ_OK) {
+        err = mz_os_unlink(pathwfs);
+        if (err != MZ_OK)
+            goto save_cleanup;
+    }
+
     /* Create the file on disk so we can save to it */
     stream = mz_stream_os_create();
     if (!stream) {
@@ -800,7 +810,8 @@ int32_t mz_zip_reader_entry_save_file(void *handle, const char *path) {
         goto save_cleanup;
     }
 
-    err = mz_stream_os_open(stream, pathwfs, MZ_OPEN_MODE_CREATE);
+    /* Refuse to follow a symlink planted at the path after the check above */
+    err = mz_stream_os_open(stream, pathwfs, MZ_OPEN_MODE_CREATE | MZ_OPEN_MODE_NOFOLLOW);
 
     if (err == MZ_OK)
         err = mz_zip_reader_entry_save(reader, stream, mz_stream_write);
@@ -949,7 +960,10 @@ int32_t mz_zip_reader_save_all(void *handle, const char *destination_dir) {
         if (destination_dir)
             mz_path_combine(path, destination_dir, resolved_name_size);
 
-        mz_path_combine(path, resolved_name, resolved_name_size);
+        /* Force the entry name to stay under the destination so an absolute path cannot escape */
+        err = mz_path_combine_safe(path, resolved_name, resolved_name_size);
+        if (err != MZ_OK)
+            break;
 
         /* Save file to disk */
         err = mz_zip_reader_entry_save_file(reader, path);
