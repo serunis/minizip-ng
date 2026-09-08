@@ -14,10 +14,12 @@
 #include "mz_os.h"
 #include "mz_strm.h"
 #include "mz_strm_buf.h"
+#include "mz_strm_os.h"
 #include "mz_strm_split.h"
 #include "mz_zip.h"
 #include "mz_zip_rw.h"
 
+#include <ctype.h>
 #include <stdio.h> /* printf */
 
 #if defined(_WIN32)
@@ -265,15 +267,470 @@ int32_t minizip_add_overwrite_cb(void *handle, void *userdata, const char *path)
     return MZ_OK;
 }
 
+static int32_t minizip_path_combine_alloc(const char *path, const char *name, char **combined_path) {
+    size_t path_length = 0;
+    size_t name_length = 0;
+    size_t combined_length = 0;
+    uint8_t append_slash = 0;
+
+    if (!path || !name || !combined_path)
+        return MZ_PARAM_ERROR;
+    *combined_path = NULL;
+
+    path_length = strlen(path);
+    name_length = strlen(name);
+    append_slash = path_length > 0 && !mz_os_is_dir_separator(path[path_length - 1]);
+    if (path_length > (size_t)-1 - name_length - append_slash - 1)
+        return MZ_MEM_ERROR;
+
+    combined_length = path_length + append_slash + name_length + 1;
+    *combined_path = (char *)malloc(combined_length);
+    if (!*combined_path)
+        return MZ_MEM_ERROR;
+
+    memcpy(*combined_path, path, path_length);
+    if (append_slash)
+        (*combined_path)[path_length++] = MZ_PATH_SLASH_PLATFORM;
+    memcpy(*combined_path + path_length, name, name_length + 1);
+    return MZ_OK;
+}
+
+static int32_t minizip_resolve_path(const char *path, char **resolved_path) {
+    const char *filename = NULL;
+    char *component = NULL;
+    char *current_path = NULL;
+    char *remaining_path = NULL;
+    char *next_path = NULL;
+    char *resolved_parent = NULL;
+    int32_t err = MZ_OK;
+
+    if (!path || !resolved_path)
+        return MZ_PARAM_ERROR;
+    *resolved_path = NULL;
+
+    current_path = (char *)strdup(path);
+    if (!current_path)
+        return MZ_MEM_ERROR;
+
+    while (1) {
+        err = mz_os_get_replace_path(current_path, &resolved_parent);
+        if (err == MZ_OK)
+            break;
+        if (err != MZ_EXIST_ERROR)
+            goto cleanup;
+
+        err = mz_path_get_filename(current_path, &filename);
+        if (err != MZ_OK || filename[0] == 0) {
+            err = MZ_EXIST_ERROR;
+            goto cleanup;
+        }
+        component = (char *)strdup(filename);
+        if (!component) {
+            err = MZ_MEM_ERROR;
+            goto cleanup;
+        }
+
+        if (remaining_path) {
+            err = minizip_path_combine_alloc(component, remaining_path, &next_path);
+            free(component);
+            component = NULL;
+            if (err != MZ_OK)
+                goto cleanup;
+            free(remaining_path);
+            remaining_path = next_path;
+            next_path = NULL;
+        } else {
+            remaining_path = component;
+            component = NULL;
+        }
+
+        mz_path_remove_filename(current_path);
+        if (current_path[0] == 0) {
+            free(current_path);
+            current_path = (char *)strdup(".");
+            if (!current_path) {
+                err = MZ_MEM_ERROR;
+                goto cleanup;
+            }
+        }
+    }
+
+    if (remaining_path) {
+        err = minizip_path_combine_alloc(resolved_parent, remaining_path, resolved_path);
+    } else {
+        *resolved_path = resolved_parent;
+        resolved_parent = NULL;
+    }
+
+cleanup:
+    free(component);
+    free(current_path);
+    free(remaining_path);
+    free(next_path);
+    free(resolved_parent);
+    return err;
+}
+
+static uint8_t minizip_path_char_matches(char path_char, char expected_char) {
+    if (mz_os_is_dir_separator(path_char) && mz_os_is_dir_separator(expected_char))
+        return 1;
+#if defined(_WIN32)
+    return (uint8_t)(tolower((unsigned char)path_char) == tolower((unsigned char)expected_char));
+#else
+    return (uint8_t)(path_char == expected_char);
+#endif
+}
+
+static uint8_t minizip_paths_equal(const char *path, const char *expected_path) {
+    if (!path || !expected_path)
+        return 0;
+    while (*path != 0 && *expected_path != 0) {
+        if (!minizip_path_char_matches(*path, *expected_path))
+            return 0;
+        path += 1;
+        expected_path += 1;
+    }
+    return (uint8_t)(*path == 0 && *expected_path == 0);
+}
+
+static uint8_t minizip_path_is_within(const char *path, const char *directory) {
+    size_t directory_length = 0;
+    size_t index = 0;
+
+    if (!path || !directory)
+        return 0;
+    directory_length = strlen(directory);
+    while (directory_length > 0 && mz_os_is_dir_separator(directory[directory_length - 1]))
+        directory_length -= 1;
+
+    for (index = 0; index < directory_length; index += 1) {
+        if (path[index] == 0 || !minizip_path_char_matches(path[index], directory[index]))
+            return 0;
+    }
+    if (directory_length == 0)
+        return (uint8_t)mz_os_is_dir_separator(path[0]);
+    return (uint8_t)mz_os_is_dir_separator(path[directory_length]);
+}
+
+static int32_t minizip_wildcard_may_include_path(const char *path, const char *wildcard_path, uint8_t *matches) {
+    const char *component_end = NULL;
+    const char *wildcard = NULL;
+    char *component = NULL;
+    char *directory = NULL;
+    char *resolved_directory = NULL;
+    size_t component_length = 0;
+    size_t directory_length = 0;
+    int32_t err = MZ_OK;
+
+    if (!path || !wildcard_path || !matches)
+        return MZ_PARAM_ERROR;
+    *matches = 0;
+
+    if (mz_path_get_filename(wildcard_path, &wildcard) != MZ_OK)
+        wildcard = wildcard_path;
+    directory = (char *)strdup(wildcard_path);
+    if (!directory)
+        return MZ_MEM_ERROR;
+    mz_path_remove_filename(directory);
+    if (directory[0] == 0) {
+        free(directory);
+        directory = (char *)strdup(".");
+        if (!directory)
+            return MZ_MEM_ERROR;
+    }
+
+    err = minizip_resolve_path(directory, &resolved_directory);
+    if (err != MZ_OK)
+        goto cleanup;
+    if (!minizip_path_is_within(path, resolved_directory))
+        goto cleanup;
+
+    directory_length = strlen(resolved_directory);
+    while (directory_length > 0 && mz_os_is_dir_separator(resolved_directory[directory_length - 1]))
+        directory_length -= 1;
+    path += directory_length;
+    while (mz_os_is_dir_separator(*path))
+        path += 1;
+    component_end = path;
+    while (*component_end != 0 && !mz_os_is_dir_separator(*component_end))
+        component_end += 1;
+
+    component_length = (size_t)(component_end - path);
+    component = (char *)malloc(component_length + 1);
+    if (!component) {
+        err = MZ_MEM_ERROR;
+        goto cleanup;
+    }
+    memcpy(component, path, component_length);
+    component[component_length] = 0;
+    if (mz_path_compare_wc(component, wildcard, 1) == MZ_OK)
+        *matches = 1;
+
+cleanup:
+    free(component);
+    free(directory);
+    free(resolved_directory);
+    return err;
+}
+
+static int32_t minizip_inputs_may_include_output(const char *output_path, minizip_opt *options, int32_t arg_count,
+                                                  const char **args, uint8_t *may_include) {
+    char *resolved_input = NULL;
+    char *resolved_output = NULL;
+    int32_t err = MZ_OK;
+    int32_t i = 0;
+    uint8_t matches = 0;
+
+    if (!output_path || !options || (!args && arg_count > 0) || !may_include || arg_count < 0)
+        return MZ_PARAM_ERROR;
+    *may_include = 0;
+
+    err = minizip_resolve_path(output_path, &resolved_output);
+    if (err != MZ_OK)
+        goto cleanup;
+
+    for (i = 0; i < arg_count && !*may_include; i += 1) {
+        if (strrchr(args[i], '*') && mz_os_file_exists(args[i]) != MZ_OK) {
+            err = minizip_wildcard_may_include_path(resolved_output, args[i], &matches);
+            if (err == MZ_OK && matches)
+                *may_include = 1;
+            if (err != MZ_OK)
+                break;
+            continue;
+        }
+
+        if (mz_os_is_symlink(args[i]) == MZ_OK && (options->store_links || !options->follow_links))
+            continue;
+        if (mz_os_path_same_file(args[i], output_path) == MZ_OK) {
+            *may_include = 1;
+            continue;
+        }
+
+        err = minizip_resolve_path(args[i], &resolved_input);
+        if (err != MZ_OK)
+            break;
+        if (mz_os_is_dir(args[i]) == MZ_OK)
+            *may_include = minizip_path_is_within(resolved_output, resolved_input);
+        else
+            *may_include = minizip_paths_equal(resolved_output, resolved_input);
+        free(resolved_input);
+        resolved_input = NULL;
+    }
+
+cleanup:
+    free(resolved_input);
+    free(resolved_output);
+    return err;
+}
+
+static int32_t minizip_open_temp_file(void *writer, const char *path, char **temp_path) {
+    const char temp_suffix[] = ".mz_tmp.ffff";
+    size_t path_length = 0;
+    size_t temp_path_size = 0;
+    uint32_t attempt = 0;
+    int32_t err = MZ_OK;
+    char *candidate = NULL;
+
+    if (!writer || !path || !temp_path)
+        return MZ_PARAM_ERROR;
+    *temp_path = NULL;
+
+    path_length = strlen(path);
+    if (path_length > (size_t)-1 - sizeof(temp_suffix))
+        return MZ_MEM_ERROR;
+    temp_path_size = path_length + sizeof(temp_suffix);
+    candidate = (char *)malloc(temp_path_size);
+    if (!candidate)
+        return MZ_MEM_ERROR;
+
+    memcpy(candidate, path, path_length);
+    for (attempt = 0; attempt <= UINT16_MAX; attempt += 1) {
+        snprintf(candidate + path_length, temp_path_size - path_length, ".mz_tmp.%04" PRIx32, attempt);
+        err = mz_zip_writer_open_file_exclusive(writer, candidate);
+        if (err == MZ_OK) {
+            *temp_path = candidate;
+            return MZ_OK;
+        }
+        if (err != MZ_EXIST_ERROR)
+            break;
+    }
+
+    free(candidate);
+    return err;
+}
+
+static int32_t minizip_make_parent_directory(const char *path) {
+    char *directory = NULL;
+    int32_t err = MZ_OK;
+
+    if (!path)
+        return MZ_PARAM_ERROR;
+    directory = (char *)strdup(path);
+    if (!directory)
+        return MZ_MEM_ERROR;
+
+    mz_path_remove_filename(directory);
+    if (directory[0] != 0 && mz_os_is_dir(directory) != MZ_OK)
+        err = mz_dir_make(directory);
+
+    free(directory);
+    return err;
+}
+
+static int32_t minizip_parent_directory_missing(const char *path, uint8_t *missing) {
+    char *directory = NULL;
+
+    if (!path || !missing)
+        return MZ_PARAM_ERROR;
+    *missing = 0;
+
+    directory = (char *)strdup(path);
+    if (!directory)
+        return MZ_MEM_ERROR;
+
+    mz_path_remove_filename(directory);
+    if (directory[0] != 0 && mz_os_is_dir(directory) != MZ_OK)
+        *missing = 1;
+
+    free(directory);
+    return MZ_OK;
+}
+
+static int32_t minizip_copy_temp_file(const char *source_path, const char *path, char **temp_path) {
+    const char temp_suffix[] = ".mz_tmp.ffff";
+    size_t path_length = 0;
+    size_t temp_path_size = 0;
+    uint32_t attempt = 0;
+    int32_t err = MZ_OK;
+    int32_t err_close = MZ_OK;
+    char *candidate = NULL;
+    void *source_stream = NULL;
+    void *target_stream = NULL;
+
+    if (!source_path || !path || !temp_path)
+        return MZ_PARAM_ERROR;
+    *temp_path = NULL;
+
+    path_length = strlen(path);
+    if (path_length > (size_t)-1 - sizeof(temp_suffix))
+        return MZ_MEM_ERROR;
+    temp_path_size = path_length + sizeof(temp_suffix);
+    candidate = (char *)malloc(temp_path_size);
+    if (!candidate)
+        return MZ_MEM_ERROR;
+    memcpy(candidate, path, path_length);
+
+    source_stream = mz_stream_os_create();
+    if (!source_stream) {
+        free(candidate);
+        return MZ_MEM_ERROR;
+    }
+    err = mz_stream_os_open(source_stream, source_path, MZ_OPEN_MODE_READ);
+
+    for (attempt = 0; err == MZ_OK && attempt <= UINT16_MAX; attempt += 1) {
+        snprintf(candidate + path_length, temp_path_size - path_length, ".mz_tmp.%04" PRIx32, attempt);
+        target_stream = mz_stream_os_create();
+        if (!target_stream) {
+            err = MZ_MEM_ERROR;
+            break;
+        }
+
+        err = mz_stream_os_open(target_stream, candidate,
+                                MZ_OPEN_MODE_WRITE | MZ_OPEN_MODE_CREATE | MZ_OPEN_MODE_EXCLUSIVE);
+        if (err == MZ_EXIST_ERROR) {
+            mz_stream_os_delete(&target_stream);
+            if (attempt == UINT16_MAX)
+                break;
+            err = MZ_OK;
+            continue;
+        }
+        if (err != MZ_OK)
+            break;
+
+        err = mz_stream_copy_to_end(target_stream, source_stream);
+        err_close = mz_stream_os_close(target_stream);
+        if (err == MZ_OK && err_close != MZ_OK)
+            err = err_close;
+        mz_stream_os_delete(&target_stream);
+
+        if (err == MZ_OK) {
+            *temp_path = candidate;
+            candidate = NULL;
+        } else {
+            mz_os_unlink(candidate);
+        }
+        break;
+    }
+
+    if (target_stream)
+        mz_stream_os_delete(&target_stream);
+    err_close = mz_stream_os_close(source_stream);
+    if (err == MZ_OK && err_close != MZ_OK) {
+        err = err_close;
+        if (*temp_path) {
+            mz_os_unlink(*temp_path);
+            free(*temp_path);
+            *temp_path = NULL;
+        }
+    }
+    mz_stream_os_delete(&source_stream);
+    free(candidate);
+    return err;
+}
+
+static int32_t minizip_process_paths(void *writer, minizip_opt *options, int32_t arg_count, const char **args,
+                                     uint8_t prepare) {
+    int32_t err = MZ_OK;
+    int32_t i = 0;
+
+    for (i = 0; i < arg_count; i += 1) {
+        if (prepare)
+            err = mz_zip_writer_prepare_path(writer, args[i], NULL, options->include_path, 1);
+        else
+            err = mz_zip_writer_add_path(writer, args[i], NULL, options->include_path, 1);
+        if (err != MZ_OK) {
+            printf("Error %" PRId32 " adding path to archive %s\n", err, args[i]);
+            break;
+        }
+    }
+
+    return err;
+}
+
 int32_t minizip_add(const char *path, const char *password, minizip_opt *options, int32_t arg_count,
                     const char **args) {
     void *writer = NULL;
     int32_t err = MZ_OK;
     int32_t err_close = MZ_OK;
-    int32_t i = 0;
-    const char *filename_in_zip = NULL;
+    uint8_t append = options->append;
+    uint8_t archive_exists = 0;
+    uint8_t preserve_temp = 0;
+    uint8_t prepare_paths = 0;
+    uint8_t self_inclusion_possible = 0;
+    uint8_t temp_created = 0;
+    uint8_t use_temp_file = 0;
+    char *replace_path = NULL;
+    char *temp_path = NULL;
 
     printf("Archive %s\n", path);
+
+    archive_exists = (mz_os_file_exists(path) == MZ_OK);
+    err = minizip_parent_directory_missing(path, &prepare_paths);
+    if (err == MZ_OK && !prepare_paths)
+        err = minizip_inputs_may_include_output(path, options, arg_count, args, &self_inclusion_possible);
+    if (err != MZ_OK)
+        return err;
+    use_temp_file = (options->disk_size == 0 && !prepare_paths && self_inclusion_possible);
+
+    if (use_temp_file && archive_exists && !append) {
+        err = minizip_add_overwrite_cb(NULL, options, path);
+        if (err == MZ_EXIST_ERROR) {
+            append = 1;
+            err = MZ_OK;
+        } else if (err != MZ_OK) {
+            return err;
+        }
+    }
 
     /* Create zip writer */
     writer = mz_zip_writer_create();
@@ -286,26 +743,50 @@ int32_t minizip_add(const char *path, const char *password, minizip_opt *options
     mz_zip_writer_set_compress_level(writer, options->compress_level);
     mz_zip_writer_set_follow_links(writer, options->follow_links);
     mz_zip_writer_set_store_links(writer, options->store_links);
-    mz_zip_writer_set_overwrite_cb(writer, options, minizip_add_overwrite_cb);
+    if (!use_temp_file)
+        mz_zip_writer_set_overwrite_cb(writer, options, minizip_add_overwrite_cb);
     mz_zip_writer_set_progress_cb(writer, options, minizip_add_progress_cb);
     mz_zip_writer_set_entry_cb(writer, options, minizip_add_entry_cb);
     mz_zip_writer_set_zip_cd(writer, options->zip_cd);
 
-    err = mz_zip_writer_open_file(writer, path, options->disk_size, options->append);
+    if (err == MZ_OK)
+        err = mz_zip_writer_set_exclude_path(writer, path);
+    if (err == MZ_OK && prepare_paths)
+        err = minizip_process_paths(writer, options, arg_count, args, 1);
+    if (err == MZ_OK && use_temp_file) {
+        err = minizip_make_parent_directory(path);
+        if (err == MZ_OK)
+            err = mz_os_get_replace_path(path, &replace_path);
+    }
 
     if (err == MZ_OK) {
-        for (i = 0; i < arg_count; i += 1) {
-            filename_in_zip = args[i];
-
-            /* Add file system path to archive */
-            err = mz_zip_writer_add_path(writer, filename_in_zip, NULL, options->include_path, 1);
-            if (err != MZ_OK) {
-                printf("Error %" PRId32 " adding path to archive %s\n", err, filename_in_zip);
-                break;
+        if (use_temp_file) {
+            if (archive_exists && append) {
+                err = minizip_copy_temp_file(replace_path, replace_path, &temp_path);
+                if (err == MZ_OK) {
+                    temp_created = 1;
+                    err = mz_zip_writer_open_file(writer, temp_path, 0, 1);
+                }
+            } else {
+                err = minizip_open_temp_file(writer, replace_path, &temp_path);
+                if (err == MZ_OK)
+                    temp_created = 1;
             }
+        } else {
+            err = mz_zip_writer_open_file(writer, path, options->disk_size, append);
         }
-    } else {
-        printf("Error %" PRId32 " opening archive for writing\n", err);
+        if (err != MZ_OK)
+            printf("Error %" PRId32 " opening archive for writing\n", err);
+    }
+
+    if (err == MZ_OK) {
+        if (prepare_paths) {
+            err = mz_zip_writer_add_prepared_paths(writer);
+            if (err != MZ_OK)
+                printf("Error %" PRId32 " adding prepared paths to archive\n", err);
+        } else {
+            err = minizip_process_paths(writer, options, arg_count, args, 0);
+        }
     }
 
     err_close = mz_zip_writer_close(writer);
@@ -316,6 +797,21 @@ int32_t minizip_add(const char *path, const char *password, minizip_opt *options
     }
 
     mz_zip_writer_delete(&writer);
+
+    if (use_temp_file && temp_path) {
+        if (err == MZ_OK) {
+            err = mz_os_replace_resolved(temp_path, replace_path);
+            if (err == MZ_INTERNAL_ERROR)
+                preserve_temp = 1;
+            if (err != MZ_OK)
+                printf("Error replacing archive with temp %s\n", temp_path);
+        }
+        if (err != MZ_OK && !preserve_temp && temp_created && mz_os_file_exists(temp_path) == MZ_OK)
+            mz_os_unlink(temp_path);
+    }
+    free(replace_path);
+    free(temp_path);
+
     return err;
 }
 

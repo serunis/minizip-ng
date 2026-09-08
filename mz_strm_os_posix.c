@@ -73,6 +73,7 @@ int32_t mz_stream_os_open(void *stream, const char *path, int32_t mode) {
     const char *mode_fopen = NULL;
     int mode_open = 0;
     int fd;
+    int open_error = 0;
 
     if (!path)
         return MZ_PARAM_ERROR;
@@ -86,20 +87,30 @@ int32_t mz_stream_os_open(void *stream, const char *path, int32_t mode) {
     } else if (mode & MZ_OPEN_MODE_CREATE) {
         mode_fopen = "w";
         mode_open = O_WRONLY | O_CREAT | O_TRUNC;
+        if (mode & MZ_OPEN_MODE_EXCLUSIVE)
+            mode_open |= O_EXCL;
     } else
         return MZ_OPEN_ERROR;
 
-    if (mode & MZ_OPEN_MODE_NOFOLLOW)
+    if (mode & (MZ_OPEN_MODE_NOFOLLOW | MZ_OPEN_MODE_EXCLUSIVE))
         mode_open |= O_NOFOLLOW;
 
     fd = open(path, mode_open, S_IRUSR | S_IWUSR | S_IRGRP);
+    if (fd == -1)
+        open_error = errno;
     if (fd != -1) {
         posix->handle = fdopen(fd, mode_fopen);
-        if (!posix->handle)
+        if (!posix->handle) {
+            open_error = errno;
             close(fd);
+            if (mode & MZ_OPEN_MODE_EXCLUSIVE)
+                unlink(path);
+        }
     }
     if (!posix->handle) {
-        posix->error = errno;
+        posix->error = open_error;
+        if ((mode & MZ_OPEN_MODE_EXCLUSIVE) && open_error == EEXIST)
+            return MZ_EXIST_ERROR;
         return MZ_OPEN_ERROR;
     }
 
