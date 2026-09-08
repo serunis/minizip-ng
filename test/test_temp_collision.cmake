@@ -8,7 +8,7 @@ set(collision_contents "existing collision file")
 file(WRITE "${collision_path}" "${collision_contents}")
 
 execute_process(
-    COMMAND "${MINIZIP}" -0 archive.zip input.bin
+    COMMAND "${MINIZIP}" -0 archive.zip "./*"
     WORKING_DIRECTORY "${TEST_DIR}"
     RESULT_VARIABLE result
     TIMEOUT 10)

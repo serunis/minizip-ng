@@ -905,6 +905,15 @@ if(MZ_BUILD_TESTS AND MZ_BUILD_UNIT_TESTS)
                     -DTEST_DIR=${TEST_TEMP_DIR}/temp-collision
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/test/test_temp_collision.cmake)
 
+        if(UNIX)
+            add_test(NAME conditional-temp
+                     COMMAND ${CMAKE_COMMAND}
+                        -DMINIZIP=$<TARGET_FILE:minizip_cli>
+                        -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/test/random.bin
+                        -DTEST_DIR=${TEST_TEMP_DIR}/conditional-temp
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/test/test_conditional_temp.cmake)
+        endif()
+
         add_test(NAME replace-failure-cleanup
                  COMMAND ${CMAKE_COMMAND}
                     -DMINIZIP=$<TARGET_FILE:minizip_cli>

@@ -5,7 +5,7 @@ configure_file("${SECOND_FILE}" "${TEST_DIR}/second.bin" COPYONLY)
 file(SHA256 "${TEST_DIR}/archive.zip" archive_hash_before)
 
 execute_process(
-    COMMAND "${MINIZIP}" -0 -a archive.zip second.bin
+    COMMAND "${MINIZIP}" -0 -a archive.zip archive.zip second.bin
     WORKING_DIRECTORY "${TEST_DIR}"
     RESULT_VARIABLE append_result
     TIMEOUT 10)

@@ -3,7 +3,7 @@ file(MAKE_DIRECTORY "${TEST_DIR}/archive.zip")
 file(COPY "${SOURCE_FILE}" DESTINATION "${TEST_DIR}")
 
 execute_process(
-    COMMAND "${MINIZIP}" -0 -o archive.zip random.bin
+    COMMAND "${MINIZIP}" -0 -o archive.zip archive.zip random.bin
     WORKING_DIRECTORY "${TEST_DIR}"
     RESULT_VARIABLE result
     TIMEOUT 10)

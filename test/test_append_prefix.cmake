@@ -29,7 +29,7 @@ if(NOT prefix_result EQUAL 0)
 endif()
 
 execute_process(
-    COMMAND "${MINIZIP}" -0 -a archive.zip second.bin
+    COMMAND "${MINIZIP}" -0 -a archive.zip archive.zip second.bin
     WORKING_DIRECTORY "${TEST_DIR}"
     RESULT_VARIABLE append_result
     TIMEOUT 10)
